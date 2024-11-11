@@ -94,6 +94,10 @@ struct thread {
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
     uint32_t *pagedir; /* Page directory. */
+    int exitStatus; // holds exit status of a thread as a schild so my parent can reap it
+    tid_t ptid; // parents tid
+    // add a file descriptor table
+
 #endif
 
     /* Owned by thread.c. */
