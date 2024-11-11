@@ -4,11 +4,19 @@
 #include "filesys/inode.h"
 #include "filesys/off_t.h"
 
+typedef int fid_t;
+
 /* An open file. */
 struct file {
     struct inode *inode;      /* File's inode. */
     off_t         pos;        /* Current position. */
     bool          deny_write; /* Has file_deny_write() been called? */
+
+    #ifdef USERPROG
+    fid_t fid;
+    struct list_elem file_elem;
+    struct list_elem thread_elem;
+    #endif
 };
 
 /* Opening and closing files. */
