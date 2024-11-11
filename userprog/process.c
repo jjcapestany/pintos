@@ -4,7 +4,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
 #include "filesys/directory.h"
 #include "filesys/file.h"
 #include "filesys/filesys.h"
@@ -19,9 +18,7 @@
 #include "userprog/pagedir.h"
 #include "userprog/process.h"
 #include "userprog/tss.h"
-
 #define LOGGING_LEVEL 6
-
 #include <log.h>
 
 struct args_struct {
@@ -37,24 +34,31 @@ struct semaphore exiting;
 
 
 
+/* Starts a new thread running a user program loaded from
+ * FILENAME.  The new thread may be scheduled (and may even exit)
+ * before process_execute() returns.  Returns the new process's
+ * thread id, or TID_ERROR if the thread cannot be created. */
 tid_t
 process_execute(const char *cmd)
 {
     char *cmd_copy;
     tid_t tid;
-
     struct args_struct args;
     log(L_TRACE, "Started process execute: %s", cmd_copy);
+
+    /* Make a copy of FILE_NAME.
+     * Otherwise there's a race between the caller and load(). */
     cmd_copy = palloc_get_page(0);
         if (cmd_copy == NULL) {
         return TID_ERROR;
     }
     strlcpy(cmd_copy, cmd, PGSIZE);
-
     args.file_name = strtok_r(cmd_copy, " ", &args.file_args);
-
     sema_init(&launched, 0);
+    sema_init(&exiting, 0);
 
+    /* Create a new thread to execute FILE_NAME.
+     * args.c test The thread is created to start executing at start_process()*/
     tid = thread_create(args.file_name, PRI_DEFAULT, start_process, &args);
     if (tid == TID_ERROR) {
         palloc_free_page(cmd_copy);
@@ -62,6 +66,9 @@ process_execute(const char *cmd)
     sema_down(&launched);
     return tid;
 }
+
+/* A thread function that loads a user process and starts it
+ * running. */
 static void
 start_process(void *args_ptr)
 {
@@ -69,36 +76,66 @@ start_process(void *args_ptr)
     struct intr_frame if_;
     bool success;
     struct thread *cur = thread_current();
+
     log(L_TRACE, "start_process()");
 
+    /* Initialize interrupt frame and load executable. */
     memset(&if_, 0, sizeof if_);
     if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
     if_.cs = SEL_UCSEG;
     if_.eflags = FLAG_IF | FLAG_MBS;
     success = load(args->file_name, args->file_args, &if_.eip, &if_.esp);
 
+
+    /* If load failed, quit. */
     if (!success) {
         thread_exit();
     }
     sema_up(&launched);
+
+    /* Start the user process by simulating a return from an
+     * interrupt, implemented by intr_exit (in
+     * threads/intr-stubs.S).  Because intr_exit takes all of its
+     * arguments on the stack in the form of a `struct intr_frame',
+     * we just point the stack pointer (%esp) to our stack frame
+     * and jump to it. */
     asm volatile ("movl %0, %%esp; jmp intr_exit" : : "g" (&if_) : "memory");
     NOT_REACHED();
 }
 
+/* Waits for thread TID to die and returns its exit status.  If
+ * it was terminated by the kernel (i.e. killed due to an
+ * exception), returns -1.  If TID is invalid or if it was not a
+ * child of the calling process, or if process_wait() has already
+ * been successfully called for the given TID, returns -1
+ * immediately, without waiting.
+ *
+ * This function will be implemented in problem 2-2.  For now, it
+ * does nothing. */
 int
 process_wait(tid_t child_tid UNUSED)
 {
     sema_down(&exiting);
 }
 
+/* Free the current process's resources. */
 void
 process_exit(void)
 {
     struct thread *cur = thread_current();
     uint32_t *pd;
 
+    /* Destroy the current process's page directory and switch back
+     * to the kernel-only page directory. */
     pd = cur->pagedir;
     if (pd != NULL) {
+        /* Correct ordering here is crucial.  We must set
+         * cur->pagedir to NULL before switching page directories,
+         * so that a timer interrupt can't switch back to the
+         * process page directory.  We must activate the base page
+         * directory before destroying the process's page
+         * directory, or our active page directory will be one
+         * that's been freed (and cleared). */
         cur->pagedir = NULL;
         pagedir_activate(NULL);
         pagedir_destroy(pd);
@@ -106,23 +143,37 @@ process_exit(void)
     sema_up(&exiting);
 }
 
+/* Sets up the CPU for running user code in the current
+ * thread.
+ * This function is called on every context switch. */
 void
 process_activate(void)
 {
     struct thread *t = thread_current();
+
+    /* Activate thread's page tables. */
     pagedir_activate(t->pagedir);
+
+    /* Set thread's kernel stack for use in processing
+     * interrupts. */
     tss_update();
 }
 
+/* We load ELF binaries.  The following definitions are taken
+ * from the ELF specification, [ELF1], more-or-less verbatim.  */
+
+/* ELF types.  See [ELF1] 1-2. */
 typedef uint32_t Elf32_Word, Elf32_Addr, Elf32_Off;
 typedef uint16_t Elf32_Half;
 
-
+/* For use with ELF types in printf(). */
 #define PE32Wx PRIx32 /* Print Elf32_Word in hexadecimal. */
 #define PE32Ax PRIx32 /* Print Elf32_Addr in hexadecimal. */
 #define PE32Ox PRIx32 /* Print Elf32_Off in hexadecimal. */
 #define PE32Hx PRIx16 /* Print Elf32_Half in hexadecimal. */
 
+/* Executable header.  See [ELF1] 1-4 to 1-8.
+ * This appears at the very beginning of an ELF binary. */
 struct Elf32_Ehdr {
     unsigned char e_ident[16];
     Elf32_Half    e_type;
@@ -140,6 +191,9 @@ struct Elf32_Ehdr {
     Elf32_Half    e_shstrndx;
 };
 
+/* Program header.  See [ELF1] 2-2 to 2-4.
+ * There are e_phnum of these, starting at file offset e_phoff
+ * (see [ELF1] 1-6). */
 struct Elf32_Phdr {
     Elf32_Word p_type;
     Elf32_Off  p_offset;
@@ -427,36 +481,17 @@ setup_stack(const char *file_name, char *args, void **esp)
         success = install_page(((uint8_t *)PHYS_BASE) - PGSIZE, kpage, true);
         if (success) {
             *esp = PHYS_BASE;
-
-
-
-
-
-
-
-
-
-
             argc = 0;
             arg = file_name;
-
             i = 0;
             while(arg != NULL){
                 len = strlen(arg) + 1;
                 argv[i] = arg;
-
                 i++;
                 argc++;
-                arg = args != NULL ? strtok_r(NULL, " ", &args) : NULL;
+                arg = args != NULL ? strtok_r(NULL, " ", &args) : NULL;//Get next token
             }
             argv[i] = NULL;
-
-
-
-
-
-
-
 
             for(i = argc - 1; i >= 0; i--){
                 *esp -= strlen(argv[i]) + 1;
@@ -477,25 +512,19 @@ setup_stack(const char *file_name, char *args, void **esp)
                 *(char **)*esp = argv[i];
             }
 
-
             char **argv_ptr = *esp;
             *esp -= sizeof(char **);
             *(char ***)*esp = argv_ptr;
 
-
             *esp -= sizeof(char **);
             *(int *)*esp = argc;
-
 
             *esp -= sizeof(void *);
             *(void **)*esp = 0;
 
-
-
         } else {
             palloc_free_page(kpage);
         }
-
     }
     return success;
 }
