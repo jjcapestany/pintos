@@ -7,9 +7,13 @@
 #include "filesys/filesys.h"
 #include "filesys/free-map.h"
 #include "filesys/inode.h"
+#include "threads/synch.h"
 
 /* Partition that contains the file system. */
 struct block *fs_device;
+
+// filesys_lock struct init
+struct lock filesys_lock;  // Define the lock
 
 static void do_format(void);
 
@@ -22,6 +26,8 @@ filesys_init(bool format)
     if (fs_device == NULL) {
         PANIC("No file system device found, can't initialize file system.");
     }
+
+    lock_init(&filesys_lock);  // Initialize the lock
 
     inode_init();
     free_map_init();
@@ -45,9 +51,11 @@ filesys_done(void)
  * Returns true if successful, false otherwise.
  * Fails if a file named NAME already exists,
  * or if internal memory allocation fails. */
-bool
-filesys_create(const char *name, off_t initial_size)
-{
+bool filesys_create(const char *name, off_t initial_size) {
+    if (name == NULL) {
+        return false;  // Return false immediately if the name is NULL
+    }
+    
     block_sector_t inode_sector = 0;
     struct dir *dir = dir_open_root();
     bool success = (dir != NULL
