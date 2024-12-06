@@ -48,7 +48,13 @@ syscall_handler(struct intr_frame *f UNUSED)
             if (!is_user_vaddr(usp + 1) || get_user((uint8_t *)(usp + 1)) == -1) sys_exit(-1);
             sys_exit(*(usp + 1));
             break;
-        case SYS_EXEC:
+        case SYS_EXEC: {
+            check_user_vaddr(usp + 1);
+            const char *cmd_line = (const char *)*(usp + 1);
+            // Validate the command line string
+            check_user_string(cmd_line);
+            f->eax = sys_exec(cmd_line);
+        }
             break;
         case SYS_WAIT:
             break;
@@ -66,7 +72,7 @@ syscall_handler(struct intr_frame *f UNUSED)
             f->eax = sys_create(file, initial_size);
         }
         break;
-        case SYS_REMOVE:
+        case SYS_REMOVE: 
             break;
         case SYS_OPEN: {
             check_user_vaddr(usp + 1);
@@ -83,9 +89,9 @@ syscall_handler(struct intr_frame *f UNUSED)
         case SYS_WRITE:
             f->eax = sys_write(*(usp + 1), (char *)*(usp + 2), *(usp + 3));
             break;
-        case SYS_SEEK:
+        case SYS_SEEK: 
             break;
-        case SYS_TELL:
+        case SYS_TELL: 
             break;
         case SYS_CLOSE:
             if (!is_user_vaddr(usp + 1) || get_user((uint8_t *)usp + 1) == -1) sys_exit(-1);
@@ -160,19 +166,41 @@ void sys_exit(int status) {
 
 int sys_write(int fd, char *buffer, unsigned size) {
     // Check if the buffer and its boundaries are valid user-space memory
-    if (!is_user_vaddr(buffer) || pagedir_get_page(thread_current()->pagedir, buffer) == NULL
-        || !is_user_vaddr(buffer + size) || pagedir_get_page(thread_current()->pagedir, buffer + size) == NULL) {
+    if (buffer == NULL || !is_user_vaddr(buffer) || pagedir_get_page(thread_current()->pagedir, buffer) == NULL) {
         sys_exit(-1);  // Invalid memory access
     }
 
+    // Ensure that all bytes in the buffer are within the valid user-space memory range
+    for (unsigned i = 0; i < size; i++) {
+        if (!is_user_vaddr(buffer + i) || pagedir_get_page(thread_current()->pagedir, buffer + i) == NULL) {
+            sys_exit(-1);  // Invalid memory access
+        }
+    }
+
+    // Handle writing to stdout (fd == 1)
     if (fd == 1) {
         putbuf(buffer, size);  // Write to stdout
         return size;
     }
+
+    // Add support for other file descriptors (e.g., stderr, files)
+    // This is just a placeholder, extend as needed based on your file system implementation.
+    if (fd == 2) {
+        // Write to stderr (for example purposes)
+        putbuf(buffer, size);  // You might use a different function for stderr
+        return size;
+    }
+
+    // If fd is invalid or not supported, return -1
     return -1;
 }
 
 int sys_read(int fd, void *buffer, unsigned size) {
+    // If the size is 0, return immediately (no data to read)
+    if (size == 0) {
+        return 0;
+    }
+
     // Check if the buffer and its boundaries are valid user-space memory
     if (!is_user_vaddr(buffer) || pagedir_get_page(thread_current()->pagedir, buffer) == NULL
         || !is_user_vaddr(buffer + size) || pagedir_get_page(thread_current()->pagedir, buffer + size) == NULL) {
@@ -182,12 +210,19 @@ int sys_read(int fd, void *buffer, unsigned size) {
     if (fd == 0) {  // Read from stdin
         unsigned i;
         for (i = 0; i < size; i++) {
-            if (!put_user(((uint8_t *)buffer) + i, input_getc())) {
+            uint8_t byte = input_getc();
+            if (byte == -1) {  // End of file or error while reading
+                sys_exit(-1);  // Invalid memory access while reading
+            }
+
+            if (!put_user(((uint8_t *)buffer) + i, byte)) {
                 sys_exit(-1);  // Invalid memory access while writing
             }
         }
         return size;
     }
+
+    // Invalid file descriptor
     return -1;
 }
 
@@ -259,4 +294,23 @@ void check_user_string(const char *str) {
         }
         str++;
     }
+}
+
+// Add the sys_exec function
+int sys_exec(const char *cmd_line) {
+    // Check if the command line pointer is valid and in user space
+    check_user_string(cmd_line);
+
+    // Check if the command is valid (e.g., it's not an empty string)
+    if (cmd_line == NULL || *cmd_line == '\0') {
+        sys_exit(-1);  // Invalid command line
+    }
+
+    // Call process_execute to load the program and start it
+    tid_t pid = process_execute(cmd_line);
+    if (pid == TID_ERROR) {
+        return -1;  // Failed to execute the program
+    }
+
+    return pid;  // Return the process ID (PID) of the new process
 }
