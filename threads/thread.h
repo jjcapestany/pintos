@@ -4,6 +4,7 @@
 #include <debug.h>
 #include <list.h>
 #include <stdint.h>
+#include "filesys/filesys.h"
 
 /* States in a thread's life cycle. */
 enum thread_status {
@@ -72,7 +73,8 @@ typedef int tid_t;
  * an assertion failure in thread_current(), which checks that
  * the `magic' member of the running thread's `struct thread' is
  * set to THREAD_MAGIC.  Stack overflow will normally change this
- * value, triggering the assertion. */
+ * value, triggering the assertion.  */
+ 
 /* The `elem' member has a dual purpose.  It can be an element in
  * the run queue (thread.c), or it can be an element in a
  * semaphore wait list (synch.c).  It can be used these two ways
@@ -94,10 +96,12 @@ struct thread {
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
     uint32_t *pagedir; /* Page directory. */
-    int exitStatus; // holds exit status of a thread as a schild so my parent can reap it
-    tid_t ptid; // parents tid
-    // add a file descriptor table
+    int exitStatus; // holds exit status of a thread as a child so my parent can reap it
+    tid_t ptid; // parent's tid
 
+    /* File descriptor table. */
+    struct file *fd_table[MAX_FILES];  // Table to store file descriptors
+    int next_fd; // Tracks the next available file descriptor
 #endif
 
     /* Owned by thread.c. */
@@ -129,6 +133,7 @@ void thread_yield(void);
 typedef void thread_action_func (struct thread *t, void *aux);
 void thread_foreach(thread_action_func *, void *);
 
+/* Priority and nice getters/setters. */
 int thread_get_priority(void);
 void thread_set_priority(int);
 int thread_get_nice(void);

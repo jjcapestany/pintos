@@ -8,6 +8,7 @@
 #include "threads/vaddr.h"
 #include "userprog/pagedir.h"
 #include <filesys/filesys.h>
+#include <string.h>
 
 static void syscall_handler(struct intr_frame *);
 void sys_halt(void);
@@ -17,8 +18,10 @@ int sys_read(int fd, void *buffer, unsigned size);
 int sys_open(const char *file_name);
 bool sys_create(const char *file, unsigned initial_size);
 
-static int get_user (const uint8_t *uaddr);
-static bool put_user (uint8_t *udst, uint8_t byte);
+static int get_user(const uint8_t *uaddr);
+static bool put_user(uint8_t *udst, uint8_t byte);
+void check_user_vaddr(const void *vaddr);
+void check_user_string(const char *str);
 
 void
 syscall_init(void)
@@ -29,12 +32,9 @@ syscall_init(void)
 static void
 syscall_handler(struct intr_frame *f UNUSED)
 {
+    int *usp = f->esp;
 
-
-    /* Remove these when implementing syscalls */
-    int * usp = f->esp;
-
-    if (!is_user_vaddr(usp) || pagedir_get_page(thread_current()->pagedir,usp) == NULL) {
+    if (!is_user_vaddr(usp) || pagedir_get_page(thread_current()->pagedir, usp) == NULL) {
         sys_exit(-1);
     }
 
@@ -45,7 +45,7 @@ syscall_handler(struct intr_frame *f UNUSED)
             sys_halt();
             break;
         case SYS_EXIT:
-            if (!is_user_vaddr(usp + 1) || get_user((uint8_t *)usp + 1) == -1) sys_exit(-1);
+            if (!is_user_vaddr(usp + 1) || get_user((uint8_t *)(usp + 1)) == -1) sys_exit(-1);
             sys_exit(*(usp + 1));
             break;
         case SYS_EXEC:
@@ -53,45 +53,48 @@ syscall_handler(struct intr_frame *f UNUSED)
         case SYS_WAIT:
             break;
         case SYS_CREATE: {
+            check_user_vaddr(usp + 1);
+            check_user_vaddr(usp + 2);
+
             const char *file = (const char *)*(usp + 1);
             unsigned initial_size = *(unsigned *)(usp + 2);
 
-            // Validate user-space pointer for file name and file content
-            if (!is_user_vaddr(file) || file == NULL || !is_user_vaddr(file + strlen(file))) {
-                sys_exit(-1);  // Invalid pointer or bad user memory
-            }
+            // Validate the file pointer
+            check_user_string(file);
 
             // Proceed with file creation
             f->eax = sys_create(file, initial_size);
         }
-            break;
+        break;
         case SYS_REMOVE:
             break;
         case SYS_OPEN: {
-                const char *file_name = (const char *)*(usp+1);
-                if (!is_user_vaddr(file_name)) sys_exit(-1);
-                if (file_name == NULL) sys_exit(-1);
-                f->eax = sys_open(file_name);
-            }
-            break;
+            check_user_vaddr(usp + 1);
+            const char *file_name = (const char *)*(usp + 1);
+            check_user_string(file_name);
+            f->eax = sys_open(file_name);
+        }
+        break;
         case SYS_FILESIZE:
             break;
         case SYS_READ:
-            f ->eax = sys_read(*(usp+1), (void*)*(usp+2), *(usp+3));
+            f->eax = sys_read(*(usp + 1), (void *)*(usp + 2), *(usp + 3));
             break;
         case SYS_WRITE:
-            f->eax = sys_write(*(usp+1), (char*)*(usp+2), *(usp+3));
+            f->eax = sys_write(*(usp + 1), (char *)*(usp + 2), *(usp + 3));
             break;
         case SYS_SEEK:
             break;
         case SYS_TELL:
             break;
         case SYS_CLOSE:
+            if (!is_user_vaddr(usp + 1) || get_user((uint8_t *)usp + 1) == -1) sys_exit(-1);
+            sys_close(*(usp + 1));
             break;
         default:
             sys_exit(-1);
             break;
-        }
+    }
 }
 
 void sys_halt(void) {
@@ -108,26 +111,51 @@ int sys_open(const char *file_name) {
         sys_exit(-1);  // Invalid pointer beyond the file name
     }
 
+    lock_acquire(&filesys_lock);
     struct file *file = filesys_open(file_name);
+    lock_release(&filesys_lock);
 
     // Check if the file exists
     if (file == NULL) {
         return -1;  // File does not exist, return error
     }
 
-    // Assign a new file descriptor
-    int fd = 2;
-    fd++;  // Increment the file descriptor (assuming fd 0 and 1 are stdin and stdout)
+    struct thread *cur = thread_current();
+
+    // Find an available slot in the file descriptor table
+    int fd = -1;
+    for (int i = 2; i < MAX_FILES; i++) {
+        if (cur->fd_table[i] == NULL) {
+            cur->fd_table[i] = file;
+            fd = i;
+            break;
+        }
+    }
+
+    if (fd == -1) {
+        file_close(file);  // No available slot, close the file
+        return -1;
+    }
 
     return fd;
 }
 
-void sys_exit(int status){
+void sys_close(int fd) {
+    struct thread *cur = thread_current();
+
+    if (fd < 2 || fd >= MAX_FILES || cur->fd_table[fd] == NULL) {
+        sys_exit(-1);  // Invalid file descriptor
+    }
+
+    file_close(cur->fd_table[fd]);
+    cur->fd_table[fd] = NULL;
+}
+
+void sys_exit(int status) {
     struct thread *cur = thread_current();
     cur->exitStatus = status;
     printf("%s: exit(%d)\n", cur->name, status);
     thread_exit();
-
 }
 
 int sys_write(int fd, char *buffer, unsigned size) {
@@ -212,4 +240,23 @@ bool sys_create(const char *file, unsigned initial_size) {
     lock_release(&filesys_lock);
 
     return success;
+}
+
+void check_user_vaddr(const void *vaddr) {
+    if (!is_user_vaddr(vaddr) || pagedir_get_page(thread_current()->pagedir, vaddr) == NULL) {
+        sys_exit(-1);
+    }
+}
+
+void check_user_string(const char *str) {
+    if (!is_user_vaddr(str) || pagedir_get_page(thread_current()->pagedir, str) == NULL) {
+        sys_exit(-1);
+    }
+
+    while (*str != '\0') {
+        if (!is_user_vaddr(str) || pagedir_get_page(thread_current()->pagedir, str) == NULL) {
+            sys_exit(-1);
+        }
+        str++;
+    }
 }
